@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -155,3 +155,38 @@ class AuthCodeRequest(BaseModel):
 
 class Auth2FARequest(BaseModel):
     password: str
+
+
+class RAGAnswerFilters(BaseModel):
+    chatIds: Optional[List[int]] = None
+    dateFrom: Optional[datetime] = None
+    dateTo: Optional[datetime] = None
+    minScore: Optional[float] = None
+
+
+class RAGAnswerRequest(BaseModel):
+    query: str
+    filters: Optional[RAGAnswerFilters] = None
+    topK: int = 20
+    answerStyle: str = "standard"
+
+
+class RAGCitation(BaseModel):
+    cid: int
+    platform: str = "telegram"
+    chat_id: int
+    chat_title: Optional[str] = None
+    username: Optional[str] = None
+    author_name: Optional[str] = None
+    message_id: int
+    date: datetime
+    score: float
+    text: str
+    tg_link: str
+
+
+class RAGAnswerResponse(BaseModel):
+    answer: Optional[dict] = None
+    citations: List[RAGCitation] = Field(default_factory=list)
+    retrieval: dict
+    error: Optional[str] = None
