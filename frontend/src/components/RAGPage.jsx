@@ -18,9 +18,12 @@ function RAGPage() {
   const [topK, setTopK] = useState(10)
   const [selectedContactId, setSelectedContactId] = useState(null)
   const [deletingSource, setDeletingSource] = useState(null)
+  const [highlightedCid, setHighlightedCid] = useState(null)
+  const [summaryCopied, setSummaryCopied] = useState(false)
   
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
+  const highlightTimeoutRef = useRef(null)
 
   useEffect(() => {
     loadSources()
@@ -116,22 +119,40 @@ function RAGPage() {
     setLoading(true)
 
     try {
-      const res = await fetch(`${API_URL}/api/rag/search?min_text_length=50&expand_query=true`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: query,
-          sources: [...new Set(selectedSources)],
-          top_k: topK
+      const selectedChatIds = [...new Set(selectedSources)]
+      const [searchRes, answerRes] = await Promise.all([
+        fetch(`${API_URL}/api/rag/search?min_text_length=50&expand_query=true`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: query,
+            sources: selectedChatIds,
+            top_k: topK
+          })
+        }),
+        fetch(`${API_URL}/api/rag/answer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: query,
+            filters: { chatIds: selectedChatIds },
+            topK: topK,
+            answerStyle: 'standard'
+          })
         })
-      })
-      
-      const data = await res.json()
-      
+      ])
+
+      const data = await searchRes.json()
+      const answerData = answerRes.ok ? await answerRes.json() : { error: 'answer_failed' }
+
       const botMessage = {
         type: 'bot',
         results: data.results,
         totalFound: data.total_found,
+        answer: answerData.answer,
+        citations: answerData.citations,
+        retrieval: answerData.retrieval,
+        answerError: answerData.error,
         timestamp: new Date()
       }
       setMessages(prev => [...prev, botMessage])
@@ -157,6 +178,27 @@ function RAGPage() {
 
   const copyToClipboard = async (text) => {
     await navigator.clipboard.writeText(text)
+  }
+
+  const handleCitationClick = (cid) => {
+    const element = document.getElementById(`citation-${cid}`)
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      setHighlightedCid(cid)
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current)
+      }
+      highlightTimeoutRef.current = setTimeout(() => {
+        setHighlightedCid(null)
+      }, 2500)
+    }
+  }
+
+  const handleCopySummary = async (markdown) => {
+    if (!markdown) return
+    await copyToClipboard(markdown)
+    setSummaryCopied(true)
+    setTimeout(() => setSummaryCopied(false), 2000)
   }
 
   return (
@@ -334,15 +376,35 @@ function RAGPage() {
                     <div className="text-sm text-telegram-textSecondary">
                       Найдено {msg.totalFound} результатов
                     </div>
+
+                    <AnswerSummary
+                      answer={msg.answer}
+                      citations={msg.citations}
+                      answerError={msg.answerError}
+                      retrieval={msg.retrieval}
+                      onCitationClick={handleCitationClick}
+                      onCopySummary={handleCopySummary}
+                      summaryCopied={summaryCopied}
+                    />
                     
-                    {msg.results.map((result, j) => (
+                    {msg.results.map((result, j) => {
+                      const citationMatch = msg.citations?.find(
+                        (citation) =>
+                          citation.message_id === result.message.id &&
+                          citation.chat_id === result.message.chat_id
+                      )
+                      const cid = citationMatch?.cid
+                      return (
                       <MessageResult 
                         key={j} 
                         result={result} 
                         copyToClipboard={copyToClipboard}
                         onContactClick={setSelectedContactId}
+                        cid={cid}
+                        highlighted={cid && cid === highlightedCid}
                       />
-                    ))}
+                      )
+                    })}
                   </div>
                 )}
 
@@ -408,7 +470,147 @@ function RAGPage() {
 }
 
 // Компонент результата поиска
-function MessageResult({ result, copyToClipboard, onContactClick }) {
+function AnswerSummary({ answer, citations, answerError, retrieval, onCitationClick, onCopySummary, summaryCopied }) {
+  const citationLookup = new Map()
+  citations?.forEach((citation) => {
+    citationLookup.set(citation.cid, citation)
+  })
+
+  if (answerError) {
+    return (
+      <div className="message-bubble border border-yellow-500/40 bg-yellow-500/10 text-yellow-200 text-sm">
+        Не удалось собрать сводку. Показываем только список источников.
+      </div>
+    )
+  }
+
+  if (!answer) {
+    return null
+  }
+
+  const { summary, sections = [], rejected = [], markdown } = answer
+
+  return (
+    <div className="message-bubble border border-telegram-blue/30 bg-telegram-sidebar space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h3 className="text-base font-semibold">Сводка по запросу</h3>
+          {retrieval && (
+            <p className="text-xs text-telegram-textSecondary">
+              Использовано источников: {retrieval.used} из {retrieval.topK} • {retrieval.latencyMs}мс
+            </p>
+          )}
+        </div>
+        <button
+          onClick={() => onCopySummary(markdown)}
+          className="text-xs text-telegram-accent hover:underline flex items-center gap-1"
+        >
+          {summaryCopied ? (
+            <>
+              <Check size={12} />
+              Скопировано
+            </>
+          ) : (
+            <>
+              <Copy size={12} />
+              Скопировать сводку
+            </>
+          )}
+        </button>
+      </div>
+
+      {summary && <p className="text-sm text-telegram-textSecondary">{summary}</p>}
+
+      <div className="space-y-4">
+        {sections.map((section, idx) => (
+          <div key={`${section.title}-${idx}`} className="space-y-2">
+            <h4 className="font-semibold text-sm text-white">{section.title}</h4>
+            <div className="space-y-3">
+              {section.items?.map((item, itemIdx) => (
+                <div key={`${section.title}-${itemIdx}`} className="border border-gray-700 rounded-lg p-3">
+                  <div className="flex flex-col gap-1 text-sm">
+                    <div className="font-medium text-telegram-accent">
+                      {item.lead?.username || item.lead?.who || 'Кандидат'}
+                    </div>
+                    {item.lead?.need && (
+                      <div className="text-white">{item.lead.need}</div>
+                    )}
+                    {item.lead?.intent && (
+                      <div className="text-xs text-telegram-textSecondary">{item.lead.intent}</div>
+                    )}
+                    {item.why_fit?.length > 0 && (
+                      <ul className="list-disc list-inside text-xs text-telegram-textSecondary space-y-1">
+                        {item.why_fit.map((reason, reasonIdx) => (
+                          <li key={reasonIdx}>{reason}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {item.next_step && (
+                      <div className="text-xs text-telegram-textSecondary">
+                        Следующий шаг: {item.next_step}
+                      </div>
+                    )}
+                  </div>
+                  {item.citations?.length > 0 && (
+                    <div className="flex items-center gap-2 mt-2 flex-wrap">
+                      {item.citations.map((cid) => {
+                        const citation = citationLookup.get(cid)
+                        return (
+                          <div key={cid} className="flex items-center gap-1">
+                            <button
+                              onClick={() => onCitationClick(cid)}
+                              className="text-xs px-2 py-1 rounded-full bg-telegram-blue/20 text-telegram-blue hover:bg-telegram-blue/30"
+                            >
+                              [{cid}]
+                            </button>
+                            {citation?.tg_link && (
+                              <a
+                                href={citation.tg_link}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs text-telegram-accent hover:underline flex items-center gap-1"
+                              >
+                                <ExternalLink size={12} />
+                              </a>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {rejected?.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="font-semibold text-sm text-white">Не подошли</h4>
+          <ul className="space-y-2 text-xs text-telegram-textSecondary">
+            {rejected.map((item, idx) => (
+              <li key={idx} className="flex items-center gap-2">
+                <span>{item.reason}</span>
+                {item.citations?.map((cid) => (
+                  <button
+                    key={cid}
+                    onClick={() => onCitationClick(cid)}
+                    className="text-xs px-2 py-1 rounded-full bg-telegram-blue/20 text-telegram-blue hover:bg-telegram-blue/30"
+                  >
+                    [{cid}]
+                  </button>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MessageResult({ result, copyToClipboard, onContactClick, cid, highlighted }) {
   const [copied, setCopied] = useState(false)
   const [expanded, setExpanded] = useState(false)
 
@@ -464,7 +666,10 @@ function MessageResult({ result, copyToClipboard, onContactClick }) {
   }
 
   return (
-    <div className="message-bubble">
+    <div
+      id={cid ? `citation-${cid}` : undefined}
+      className={`message-bubble ${highlighted ? 'message-highlight' : ''}`}
+    >
       {/* Header */}
       <div className="flex items-center gap-3 mb-2">
         <button 
@@ -524,6 +729,7 @@ function MessageResult({ result, copyToClipboard, onContactClick }) {
       <div className="flex items-center justify-between pt-2 border-t border-gray-700 text-xs flex-wrap gap-2">
         <div className="flex items-center gap-3 text-telegram-textSecondary">
           <span>msg: {result.message.id}</span>
+          {cid && <span>[{cid}]</span>}
           {result.message.views && (
             <span>👁 {result.message.views}</span>
           )}

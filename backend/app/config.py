@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     qdrant_port: int = 6333
     openai_api_key: str
     embedding_model: str = "text-embedding-3-small"
+    rag_answer_model: str = "gpt-4o-mini"
+    rag_answer_context_tokens: int = 3000
     data_dir: str = "/app/data"
     session_dir: str = "/app/session"
 

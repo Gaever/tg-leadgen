@@ -3,7 +3,16 @@ from fastapi.responses import JSONResponse
 from typing import List, Optional
 from pydantic import BaseModel
 from app.rag_service import rag_service
-from app.models import RAGQuery, RAGResponse, RAGSource, RAGResult, ContactInfo
+from app.models import (
+    RAGQuery,
+    RAGResponse,
+    RAGSource,
+    RAGResult,
+    ContactInfo,
+    RAGAnswerRequest,
+    RAGAnswerResponse,
+    RAGAnswerFilters
+)
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
 
@@ -69,6 +78,26 @@ async def search_messages(
         results=results,
         total_found=len(results)
     )
+
+
+@router.post("/answer", response_model=RAGAnswerResponse)
+async def get_rag_answer(request: RAGAnswerRequest):
+    """Синтезированный ответ на запрос пользователя"""
+    filters = request.filters or RAGAnswerFilters()
+    chat_ids = filters.chatIds
+    if not chat_ids:
+        chat_ids = [source.chat_id for source in rag_service.get_available_sources()]
+
+    response = await rag_service.generate_answer(
+        query=request.query,
+        chat_ids=chat_ids,
+        top_k=request.topK,
+        answer_style=request.answerStyle,
+        date_from=filters.dateFrom,
+        date_to=filters.dateTo,
+        min_score=filters.minScore
+    )
+    return response
 
 
 @router.get("/contacts", response_model=List[ContactInfo])

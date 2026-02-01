@@ -1,7 +1,9 @@
 import os
 import json
 import httpx
-from typing import List, Optional, Set
+import time
+import logging
+from typing import List, Optional, Set, Dict, Any
 from datetime import datetime
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
@@ -29,6 +31,7 @@ class RAGService:
         self._ensure_collections()
         self._known_contacts: Set[int] = set()
         self._load_known_contacts()
+        self.logger = logging.getLogger("rag_answer")
 
     def _ensure_collections(self):
         collections = [c.name for c in self.qdrant.get_collections().collections]
@@ -310,6 +313,321 @@ class RAGService:
             response.raise_for_status()
             expanded = response.json()["choices"][0]["message"]["content"]
             return f"{query} {expanded}"
+
+    def _estimate_tokens(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def _build_canonical_documents(
+        self,
+        results: List[RAGResult],
+        min_text_length: int = 20,
+        max_tokens: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        seen_msg_ids: Set[int] = set()
+        documents: List[Dict[str, Any]] = []
+        tokens_used = 0
+        limit = max_tokens or self.settings.rag_answer_context_tokens
+
+        for result in results:
+            message = result.message
+            if message.id in seen_msg_ids:
+                continue
+            if not message.text or len(message.text.strip()) < min_text_length:
+                continue
+
+            doc_tokens = self._estimate_tokens(message.text)
+            if tokens_used + doc_tokens > limit:
+                break
+
+            seen_msg_ids.add(message.id)
+            tokens_used += doc_tokens
+
+            author_name_parts = [message.author.first_name or "", message.author.last_name or ""]
+            author_name = " ".join(p for p in author_name_parts if p).strip() or None
+            username = f"@{message.author.username}" if message.author.username else None
+            chat_tags = [message.topic_title] if message.topic_title else []
+
+            documents.append({
+                "cid": len(documents) + 1,
+                "platform": "telegram",
+                "chat_id": message.chat_id,
+                "chat_title": message.chat_title,
+                "chat_tags": chat_tags,
+                "username": username,
+                "author_name": author_name,
+                "msg_id": message.id,
+                "date": message.date.isoformat(),
+                "score": result.score,
+                "text": message.text,
+                "tg_link": message.telegram_link
+            })
+
+        return documents
+
+    def _build_answer_prompt(self, query: str, documents: List[Dict[str, Any]], answer_style: str) -> List[Dict[str, str]]:
+        style_note = "короткий" if answer_style == "brief" else "стандартный"
+        schema = """{
+  "summary": "string",
+  "sections": [
+    {
+      "title": "string",
+      "items": [
+        {
+          "lead": {
+            "username": "@username",
+            "who": "string",
+            "intent": "string",
+            "need": "string"
+          },
+          "why_fit": ["string"],
+          "next_step": "string",
+          "citations": [1]
+        }
+      ]
+    }
+  ],
+  "rejected": [
+    {
+      "reason": "string",
+      "citations": [2]
+    }
+  ]
+}"""
+        system_message = (
+            "Ты — Answer Composer для лидогенерации. "
+            "Твоя задача — синтезировать ответ по сообщениям из Telegram. "
+            "Отвечай строго JSON по схеме. Используй только citations из cid документов. "
+            "Нельзя выдумывать факты. Опирайся на поле text. "
+            "Группируй в 3–6 секций, если есть данные. "
+            "Для каждого кандидата обязательно: why_fit и next_step (1 фраза). "
+            "Отдельно массив rejected для нерелевантных/специалистов. "
+            "Если данных недостаточно — создай секцию 'Нужны уточнения' с вопросами и citations. "
+            f"Стиль ответа: {style_note}."
+        )
+        user_message = (
+            "Запрос пользователя:\n"
+            f"{query}\n\n"
+            "Документы (канонический JSON):\n"
+            f"{json.dumps(documents, ensure_ascii=False)}\n\n"
+            "Схема ответа (JSON):\n"
+            f"{schema}"
+        )
+        return [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message}
+        ]
+
+    def _build_repair_prompt(self, content: str) -> List[Dict[str, str]]:
+        system_message = (
+            "Ты — JSON repair assistant. "
+            "Приведи вывод к строгому JSON по указанной схеме. "
+            "Не добавляй комментариев или текста вне JSON."
+        )
+        user_message = (
+            "Исправь следующий ответ в валидный JSON по схеме:\n"
+            f"{content}"
+        )
+        return [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message}
+        ]
+
+    def _call_chat_completion(self, messages: List[Dict[str, str]]) -> str:
+        with httpx.Client(timeout=40.0) as client:
+            response = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.settings.openai_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.settings.rag_answer_model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "max_tokens": 1200,
+                    "response_format": {"type": "json_object"}
+                }
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+
+    def _build_answer_markdown(self, answer_payload: Dict[str, Any]) -> str:
+        summary = answer_payload.get("summary", "")
+        sections = answer_payload.get("sections", [])
+        rejected = answer_payload.get("rejected", [])
+        lines: List[str] = []
+        if summary:
+            lines.append(summary)
+            lines.append("")
+        for section in sections:
+            title = section.get("title") or "Секция"
+            lines.append(f"### {title}")
+            for item in section.get("items", []):
+                lead = item.get("lead", {})
+                username = lead.get("username") or lead.get("who") or "Кандидат"
+                need = lead.get("need") or lead.get("intent") or ""
+                why_fit = "; ".join(item.get("why_fit") or [])
+                next_step = item.get("next_step") or ""
+                citations = item.get("citations") or []
+                citation_text = "".join([f"[{cid}]" for cid in citations])
+                parts = [f"**{username}**"]
+                if need:
+                    parts.append(need)
+                if why_fit:
+                    parts.append(why_fit)
+                if next_step:
+                    parts.append(f"Дальше: {next_step}")
+                if citation_text:
+                    parts.append(citation_text)
+                lines.append(f"- {' — '.join(parts)}")
+            lines.append("")
+        if rejected:
+            lines.append("### Не подошли")
+            for item in rejected:
+                reason = item.get("reason") or "Не подходит"
+                citations = item.get("citations") or []
+                citation_text = "".join([f"[{cid}]" for cid in citations])
+                lines.append(f"- {reason} {citation_text}".strip())
+        return "\n".join(lines).strip()
+
+    def _validate_answer_citations(self, answer_payload: Dict[str, Any], max_cid: int) -> Dict[str, Any]:
+        def normalize_citations(values: Any) -> List[int]:
+            if not isinstance(values, list):
+                return []
+            valid = []
+            for cid in values:
+                if isinstance(cid, int) and 1 <= cid <= max_cid:
+                    valid.append(cid)
+            return list(dict.fromkeys(valid))
+
+        sections = answer_payload.get("sections", [])
+        validated_sections = []
+        for section in sections:
+            items = section.get("items", [])
+            validated_items = []
+            for item in items:
+                citations = normalize_citations(item.get("citations"))
+                if not citations:
+                    continue
+                item["citations"] = citations
+                validated_items.append(item)
+            if validated_items:
+                section["items"] = validated_items
+                validated_sections.append(section)
+
+        rejected = answer_payload.get("rejected", [])
+        validated_rejected = []
+        for item in rejected:
+            citations = normalize_citations(item.get("citations"))
+            if not citations:
+                continue
+            item["citations"] = citations
+            validated_rejected.append(item)
+
+        answer_payload["sections"] = validated_sections
+        answer_payload["rejected"] = validated_rejected
+        return answer_payload
+
+    async def generate_answer(
+        self,
+        query: str,
+        chat_ids: List[int],
+        top_k: int = 20,
+        answer_style: str = "standard",
+        min_text_length: int = 20,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        min_score: Optional[float] = None
+    ) -> Dict[str, Any]:
+        start_time = time.perf_counter()
+        results = await self.search(
+            query=query,
+            chat_ids=chat_ids,
+            top_k=top_k,
+            min_text_length=min_text_length,
+            expand_query=True
+        )
+
+        filtered_results: List[RAGResult] = []
+        for result in results:
+            message_date = result.message.date
+            if date_from and message_date < date_from:
+                continue
+            if date_to and message_date > date_to:
+                continue
+            if min_score is not None and result.score < min_score:
+                continue
+            filtered_results.append(result)
+
+        documents = self._build_canonical_documents(filtered_results, min_text_length=min_text_length)
+        latency_ms = int((time.perf_counter() - start_time) * 1000)
+
+        if not documents:
+            return {
+                "answer": {
+                    "summary": "Недостаточно данных для сводки по выбранным источникам.",
+                    "sections": [],
+                    "rejected": [],
+                    "markdown": "Недостаточно данных для сводки по выбранным источникам."
+                },
+                "citations": [],
+                "retrieval": {"topK": top_k, "used": 0, "latencyMs": latency_ms},
+                "error": None
+            }
+
+        raw_content = ""
+        try:
+            prompt = self._build_answer_prompt(query, documents, answer_style)
+            raw_content = self._call_chat_completion(prompt)
+            answer_payload = json.loads(raw_content)
+        except Exception:
+            try:
+                repair_prompt = self._build_repair_prompt(raw_content)
+                repaired = self._call_chat_completion(repair_prompt)
+                answer_payload = json.loads(repaired)
+            except Exception as repair_error:
+                self.logger.warning("RAG answer JSON repair failed: %s", repair_error)
+                return {
+                    "answer": None,
+                    "citations": [],
+                    "retrieval": {"topK": top_k, "used": len(documents), "latencyMs": latency_ms},
+                    "error": "invalid_json"
+                }
+
+        answer_payload = self._validate_answer_citations(answer_payload, max_cid=len(documents))
+        markdown = self._build_answer_markdown(answer_payload)
+        answer_payload["markdown"] = markdown
+
+        citations = []
+        for doc in documents:
+            citations.append({
+                "cid": doc["cid"],
+                "platform": doc["platform"],
+                "chat_id": doc.get("chat_id"),
+                "chat_title": doc.get("chat_title"),
+                "username": doc.get("username"),
+                "author_name": doc.get("author_name"),
+                "message_id": doc.get("msg_id"),
+                "date": doc.get("date"),
+                "score": doc.get("score"),
+                "text": doc.get("text"),
+                "tg_link": doc.get("tg_link")
+            })
+
+        latency_ms = int((time.perf_counter() - start_time) * 1000)
+        self.logger.info(
+            "RAG answer query=%s topK=%s used=%s latencyMs=%s",
+            query, top_k, len(documents), latency_ms
+        )
+        self.logger.info("RAG answer docs: %s", [doc["msg_id"] for doc in documents])
+        self.logger.info("RAG answer payload: %s", json.dumps(answer_payload, ensure_ascii=False))
+
+        return {
+            "answer": answer_payload,
+            "citations": citations,
+            "retrieval": {"topK": top_k, "used": len(documents), "latencyMs": latency_ms},
+            "error": None
+        }
 
     def _message_to_point_id(self, chat_id: int, message_id: int, topic_id: Optional[int] = None) -> str:
         if topic_id:
