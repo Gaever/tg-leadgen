@@ -104,6 +104,7 @@ class DownloadSettings(BaseModel):
     topic_id: Optional[int] = None
     limit: int = 100
     offset_id: int = 0
+    page: int = 1
     min_id: int = 0
     max_id: int = 0
 

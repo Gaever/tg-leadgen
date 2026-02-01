@@ -277,6 +277,11 @@ class TelegramService:
         
         if settings.offset_id > 0:
             kwargs['offset_id'] = settings.offset_id
+        elif settings.page > 1:
+            # Используем add_offset для пагинации
+            # add_offset смещает выборку относительно offset_id (который 0 по умолчанию = самое свежее)
+            kwargs['add_offset'] = (settings.page - 1) * settings.limit
+
         if settings.min_id > 0:
             kwargs['min_id'] = settings.min_id
         if settings.max_id > 0:

@@ -7,7 +7,7 @@ import {
 
 function DownloadModal({ chat, topic, onClose }) {
   const [limit, setLimit] = useState(100)
-  const [offsetId, setOffsetId] = useState(0)
+  const [page, setPage] = useState(1)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [minId, setMinId] = useState(0)
   const [maxId, setMaxId] = useState(0)
@@ -39,7 +39,7 @@ function DownloadModal({ chat, topic, onClose }) {
           chat_id: chat.id,
           topic_id: topic?.id || null,
           limit,
-          offset_id: offsetId,
+          page,
           min_id: minId,
           max_id: maxId
         })
@@ -139,16 +139,16 @@ function DownloadModal({ chat, topic, onClose }) {
             />
           </div>
 
-          {/* Offset */}
+          {/* Page */}
           <div>
             <label className="block text-sm text-telegram-textSecondary mb-2">
-              Начать с сообщения ID (0 = с последнего)
+              Номер страницы (1 = самые свежие)
             </label>
             <input
               type="number"
-              value={offsetId}
-              onChange={(e) => setOffsetId(parseInt(e.target.value) || 0)}
-              min={0}
+              value={page}
+              onChange={(e) => setPage(parseInt(e.target.value) || 1)}
+              min={1}
               disabled={downloading}
               className="w-full px-4 py-2 bg-telegram-bg rounded-xl focus:outline-none focus:ring-2 focus:ring-telegram-blue disabled:opacity-50"
             />
