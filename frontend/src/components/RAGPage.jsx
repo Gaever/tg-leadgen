@@ -2,9 +2,10 @@ import React, { useState, useEffect, useRef } from 'react'
 import { API_URL } from '../App'
 import { 
   Search, Send, Loader2, Database, 
-  ChevronDown, ChevronUp, User, ExternalLink,
-  Copy, Check, MessageSquare, Filter
+  ExternalLink, Copy, Check, Filter, Download,
+  Users, Trash2, X
 } from 'lucide-react'
+import ContactModal from './ContactModal'
 
 function RAGPage() {
   const [sources, setSources] = useState([])
@@ -15,6 +16,8 @@ function RAGPage() {
   const [showSources, setShowSources] = useState(true)
   const [stats, setStats] = useState(null)
   const [topK, setTopK] = useState(10)
+  const [selectedContactId, setSelectedContactId] = useState(null)
+  const [deletingSource, setDeletingSource] = useState(null)
   
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
@@ -33,7 +36,6 @@ function RAGPage() {
       const res = await fetch(`${API_URL}/api/rag/sources`)
       const data = await res.json()
       setSources(data)
-      // Select all sources by default
       setSelectedSources(data.map(s => s.chat_id))
     } catch (err) {
       console.error('Error loading sources:', err)
@@ -66,6 +68,41 @@ function RAGPage() {
     setSelectedSources([])
   }
 
+  const exportMessages = () => {
+    window.open(`${API_URL}/api/rag/messages/export`, '_blank')
+  }
+
+  const exportContacts = () => {
+    window.open(`${API_URL}/api/rag/contacts/export`, '_blank')
+  }
+
+  const deleteSource = async (source) => {
+    if (!confirm(`Удалить "${source.chat_title}"? Это удалит ${source.messages_count} сообщений из базы.`)) {
+      return
+    }
+    
+    setDeletingSource(source.chat_id)
+    try {
+      const url = source.topic_id 
+        ? `${API_URL}/api/rag/sources/${source.chat_id}?topic_id=${source.topic_id}`
+        : `${API_URL}/api/rag/sources/${source.chat_id}`
+      
+      const res = await fetch(url, { method: 'DELETE' })
+      const data = await res.json()
+      
+      if (data.success) {
+        loadSources()
+        loadStats()
+      } else {
+        alert('Ошибка удаления: ' + data.error)
+      }
+    } catch (err) {
+      alert('Ошибка: ' + err.message)
+    } finally {
+      setDeletingSource(null)
+    }
+  }
+
   const handleSearch = async () => {
     if (!query.trim() || selectedSources.length === 0) return
 
@@ -79,7 +116,7 @@ function RAGPage() {
     setLoading(true)
 
     try {
-      const res = await fetch(`${API_URL}/api/rag/search`, {
+      const res = await fetch(`${API_URL}/api/rag/search?min_text_length=50&expand_query=true`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -122,12 +159,6 @@ function RAGPage() {
     await navigator.clipboard.writeText(text)
   }
 
-  const getAvatarGradient = (id) => {
-    const gradients = ['avatar-gradient-1', 'avatar-gradient-2', 'avatar-gradient-3', 
-                       'avatar-gradient-4', 'avatar-gradient-5', 'avatar-gradient-6']
-    return gradients[Math.abs(id) % gradients.length]
-  }
-
   return (
     <div className="h-full flex">
       {/* Sources sidebar */}
@@ -145,19 +176,27 @@ function RAGPage() {
             )}
           </div>
           
-          <div className="flex gap-2 text-xs">
+          <div className="flex flex-wrap gap-2 text-xs">
             <button 
               onClick={selectAllSources}
               className="text-telegram-accent hover:underline"
             >
-              Выбрать все
+              Все
             </button>
             <span className="text-telegram-textSecondary">|</span>
             <button 
               onClick={deselectAllSources}
               className="text-telegram-accent hover:underline"
             >
-              Снять все
+              Снять
+            </button>
+            <span className="text-telegram-textSecondary">|</span>
+            <button
+              onClick={exportMessages}
+              className="text-telegram-accent hover:underline flex items-center gap-1"
+            >
+              <Download size={12} />
+              JSON
             </button>
           </div>
         </div>
@@ -171,9 +210,9 @@ function RAGPage() {
             </div>
           ) : (
             sources.map(source => (
-              <label
+              <div
                 key={`${source.chat_id}_${source.topic_id || ''}`}
-                className="flex items-center gap-3 p-2 rounded-lg hover:bg-telegram-hover cursor-pointer transition-colors"
+                className="flex items-center gap-2 p-2 rounded-lg hover:bg-telegram-hover transition-colors group"
               >
                 <input
                   type="checkbox"
@@ -192,24 +231,54 @@ function RAGPage() {
                     {source.messages_count.toLocaleString()} сообщений
                   </p>
                 </div>
-              </label>
+                <button
+                  onClick={() => deleteSource(source)}
+                  disabled={deletingSource === source.chat_id}
+                  className="p-1.5 text-telegram-textSecondary hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-50"
+                  title="Удалить источник"
+                >
+                  {deletingSource === source.chat_id ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <Trash2 size={14} />
+                  )}
+                </button>
+              </div>
             ))
           )}
         </div>
 
-        {/* Top K setting */}
-        <div className="p-4 border-t border-gray-800">
-          <label className="block text-sm text-telegram-textSecondary mb-2">
-            Количество результатов: {topK}
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={50}
-            value={topK}
-            onChange={(e) => setTopK(parseInt(e.target.value))}
-            className="w-full"
-          />
+        {/* Stats & Export */}
+        <div className="p-4 border-t border-gray-800 space-y-3">
+          {stats?.contacts_count > 0 && (
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-telegram-textSecondary flex items-center gap-2">
+                <Users size={14} />
+                {stats.contacts_count} контактов
+              </span>
+              <button 
+                onClick={exportContacts}
+                className="text-telegram-accent hover:underline flex items-center gap-1 text-xs"
+              >
+                <Download size={12} />
+                Экспорт
+              </button>
+            </div>
+          )}
+          
+          <div>
+            <label className="block text-sm text-telegram-textSecondary mb-2">
+              Результатов: {topK}
+            </label>
+            <input
+              type="range"
+              min={1}
+              max={50}
+              value={topK}
+              onChange={(e) => setTopK(parseInt(e.target.value))}
+              className="w-full"
+            />
+          </div>
         </div>
       </div>
 
@@ -239,11 +308,13 @@ function RAGPage() {
                 <Search size={48} className="mx-auto mb-4 opacity-50" />
                 <h2 className="text-xl font-semibold text-white mb-2">RAG Поиск по сообщениям</h2>
                 <p className="text-sm mb-4">
-                  Введите запрос для поиска релевантных сообщений в выбранных источниках.
-                  Например: "найди посты про онлайн школы" или "авторы которые пишут про маркетинг"
+                  Введите запрос для поиска релевантных сообщений. Запрос автоматически расширяется для лучших результатов.
                 </p>
-                <div className="text-xs bg-telegram-sidebar p-3 rounded-lg">
-                  💡 Результаты показывают оригинальные сообщения из базы с id авторов
+                <div className="text-xs bg-telegram-sidebar p-3 rounded-lg text-left space-y-1">
+                  <p>💡 <strong>Примеры запросов:</strong></p>
+                  <p>• "онлайн школы, курсы, обучение"</p>
+                  <p>• "ищу подрядчика, нужен специалист"</p>
+                  <p>• "маркетинг, продвижение, реклама"</p>
                 </div>
               </div>
             </div>
@@ -265,7 +336,12 @@ function RAGPage() {
                     </div>
                     
                     {msg.results.map((result, j) => (
-                      <MessageResult key={j} result={result} copyToClipboard={copyToClipboard} />
+                      <MessageResult 
+                        key={j} 
+                        result={result} 
+                        copyToClipboard={copyToClipboard}
+                        onContactClick={setSelectedContactId}
+                      />
                     ))}
                   </div>
                 )}
@@ -282,7 +358,7 @@ function RAGPage() {
           {loading && (
             <div className="flex items-center gap-2 text-telegram-textSecondary">
               <Loader2 className="animate-spin" size={20} />
-              Поиск...
+              Поиск (с расширением запроса)...
             </div>
           )}
           
@@ -319,12 +395,20 @@ function RAGPage() {
           )}
         </div>
       </div>
+
+      {/* Contact Modal */}
+      {selectedContactId && (
+        <ContactModal
+          userId={selectedContactId}
+          onClose={() => setSelectedContactId(null)}
+        />
+      )}
     </div>
   )
 }
 
-// Separate component for message result
-function MessageResult({ result, copyToClipboard }) {
+// Компонент результата поиска
+function MessageResult({ result, copyToClipboard, onContactClick }) {
   const [copied, setCopied] = useState(false)
   const [expanded, setExpanded] = useState(false)
 
@@ -335,7 +419,8 @@ function MessageResult({ result, copyToClipboard }) {
       author_id: result.message.author.id,
       author_username: result.message.author.username,
       text: result.message.text,
-      date: result.message.date
+      date: result.message.date,
+      telegram_link: getTelegramLink()
     }
     await copyToClipboard(JSON.stringify(data, null, 2))
     setCopied(true)
@@ -366,16 +451,36 @@ function MessageResult({ result, copyToClipboard }) {
     return `User ${author.id}`
   }
 
+  const getTelegramLink = () => {
+    const { chat_id, chat_username, id } = result.message
+    if (chat_username) {
+      return `https://t.me/${chat_username}/${id}`
+    }
+    let cleanId = String(chat_id)
+    if (cleanId.startsWith('-100')) {
+      cleanId = cleanId.slice(4)
+    }
+    return `https://t.me/c/${cleanId}/${id}`
+  }
+
   return (
     <div className="message-bubble">
       {/* Header */}
       <div className="flex items-center gap-3 mb-2">
-        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium ${getAvatarGradient(result.message.author.id)}`}>
+        <button 
+          onClick={() => onContactClick(result.message.author.id)}
+          className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium ${getAvatarGradient(result.message.author.id)} hover:opacity-80 transition-opacity`}
+        >
           {getAuthorName()[0].toUpperCase()}
-        </div>
+        </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="font-medium text-telegram-accent">{getAuthorName()}</span>
+            <button 
+              onClick={() => onContactClick(result.message.author.id)}
+              className="font-medium text-telegram-accent hover:underline"
+            >
+              {getAuthorName()}
+            </button>
             <span className="text-xs text-telegram-textSecondary">
               ID: {result.message.author.id}
             </span>
@@ -390,7 +495,7 @@ function MessageResult({ result, copyToClipboard }) {
             )}
           </div>
         </div>
-        <div className="text-right">
+        <div className="text-right flex flex-col items-end gap-1">
           <div className="text-xs text-telegram-textSecondary">
             {formatDate(result.message.date)}
           </div>
@@ -415,14 +520,22 @@ function MessageResult({ result, copyToClipboard }) {
         )}
       </div>
 
-      {/* Footer with IDs and actions */}
-      <div className="flex items-center justify-between pt-2 border-t border-gray-700 text-xs">
+      {/* Footer with links and actions */}
+      <div className="flex items-center justify-between pt-2 border-t border-gray-700 text-xs flex-wrap gap-2">
         <div className="flex items-center gap-3 text-telegram-textSecondary">
-          <span>msg_id: {result.message.id}</span>
-          <span>chat_id: {result.message.chat_id}</span>
+          <span>msg: {result.message.id}</span>
           {result.message.views && (
             <span>👁 {result.message.views}</span>
           )}
+          <a
+            href={getTelegramLink()}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-telegram-accent hover:underline flex items-center gap-1"
+          >
+            <ExternalLink size={12} />
+            Открыть в TG
+          </a>
         </div>
         <button
           onClick={handleCopy}
@@ -436,7 +549,7 @@ function MessageResult({ result, copyToClipboard }) {
           ) : (
             <>
               <Copy size={14} />
-              Копировать JSON
+              JSON
             </>
           )}
         </button>

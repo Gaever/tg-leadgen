@@ -42,6 +42,7 @@ class TelegramMessage(BaseModel):
     id: int
     chat_id: int
     chat_title: str
+    chat_username: Optional[str] = None  # для формирования ссылки
     topic_id: Optional[int] = None
     topic_title: Optional[str] = None
     author: MessageAuthor
@@ -50,6 +51,52 @@ class TelegramMessage(BaseModel):
     reply_to_msg_id: Optional[int] = None
     views: Optional[int] = None
     forwards: Optional[int] = None
+    
+    @property
+    def telegram_link(self) -> str:
+        """Ссылка на сообщение в Telegram"""
+        if self.chat_username:
+            return f"https://t.me/{self.chat_username}/{self.id}"
+        # Для приватных чатов используем формат c/
+        # chat_id нужно преобразовать (убрать -100 префикс)
+        clean_id = str(self.chat_id)
+        if clean_id.startswith("-100"):
+            clean_id = clean_id[4:]
+        return f"https://t.me/c/{clean_id}/{self.id}"
+
+
+class ContactInfo(BaseModel):
+    """Информация о контакте/пользователе"""
+    id: int
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    birthday: Optional[str] = None  # формат "DD.MM.YYYY" или "DD.MM"
+    photo_id: Optional[str] = None
+    
+    # Связанные данные
+    common_chats_count: Optional[int] = None
+    personal_channel_id: Optional[int] = None
+    personal_channel_title: Optional[str] = None
+    
+    # Метаданные
+    first_seen_chat_id: Optional[int] = None
+    first_seen_message_id: Optional[int] = None
+    updated_at: Optional[datetime] = None
+    messages_count: int = 0
+    
+    @property
+    def telegram_link(self) -> str:
+        if self.username:
+            return f"https://t.me/{self.username}"
+        return f"tg://user?id={self.id}"
+    
+    @property
+    def full_name(self) -> str:
+        parts = [self.first_name or "", self.last_name or ""]
+        return " ".join(p for p in parts if p).strip() or f"User {self.id}"
 
 
 class DownloadSettings(BaseModel):

@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from typing import List, Optional, AsyncGenerator
+from typing import List, Optional, AsyncGenerator, Set
 from datetime import datetime
 from telethon import TelegramClient
 from telethon.tl.types import (
@@ -9,14 +9,17 @@ from telethon.tl.types import (
     MessageService, Message,
     PeerChannel, PeerChat, PeerUser,
     ChannelForbidden, ChatForbidden,
-    ForumTopic as TLForumTopic
+    ForumTopic as TLForumTopic,
+    UserFull
 )
 from telethon.tl.functions.channels import GetForumTopicsRequest
-from telethon.errors import SessionPasswordNeededError
+from telethon.tl.functions.users import GetFullUserRequest
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, UserPrivacyRestrictedError
 from app.config import get_settings
 from app.models import (
     ChatInfo, ChatType, ForumTopic, 
-    TelegramMessage, MessageAuthor, DownloadSettings
+    TelegramMessage, MessageAuthor, DownloadSettings,
+    ContactInfo
 )
 
 
@@ -34,6 +37,10 @@ class TelegramService:
         self._connected = False
         self._auth_state = "disconnected"
         self._phone_code_hash = None
+        
+        # Очередь контактов для обогащения
+        self._contacts_queue: Set[int] = set()
+        self._enriching = False
 
     async def connect(self):
         if not self._connected:
@@ -192,6 +199,60 @@ class TelegramService:
         
         return topics
 
+    async def get_user_full_info(self, user_id: int) -> Optional[ContactInfo]:
+        """Получить полную информацию о пользователе"""
+        await self.connect()
+        try:
+            full: UserFull = await self.client(GetFullUserRequest(user_id))
+            user = full.users[0] if full.users else None
+            
+            if not user:
+                return None
+            
+            # Парсим день рождения если есть
+            birthday = None
+            if hasattr(full.full_user, 'birthday') and full.full_user.birthday:
+                bd = full.full_user.birthday
+                if hasattr(bd, 'year') and bd.year:
+                    birthday = f"{bd.day:02d}.{bd.month:02d}.{bd.year}"
+                else:
+                    birthday = f"{bd.day:02d}.{bd.month:02d}"
+            
+            # Личный канал
+            personal_channel_id = None
+            personal_channel_title = None
+            if hasattr(full.full_user, 'personal_channel_id') and full.full_user.personal_channel_id:
+                personal_channel_id = full.full_user.personal_channel_id
+                # Попробуем получить название
+                for chat in full.chats:
+                    if chat.id == personal_channel_id:
+                        personal_channel_title = chat.title
+                        break
+            
+            return ContactInfo(
+                id=user.id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                phone=user.phone if hasattr(user, 'phone') else None,
+                bio=full.full_user.about if hasattr(full.full_user, 'about') else None,
+                birthday=birthday,
+                photo_id=str(user.photo.photo_id) if user.photo else None,
+                common_chats_count=full.full_user.common_chats_count if hasattr(full.full_user, 'common_chats_count') else None,
+                personal_channel_id=personal_channel_id,
+                personal_channel_title=personal_channel_title,
+                updated_at=datetime.utcnow()
+            )
+        except UserPrivacyRestrictedError:
+            # Пользователь ограничил доступ
+            return None
+        except FloodWaitError as e:
+            print(f"Flood wait: {e.seconds} seconds")
+            raise
+        except Exception as e:
+            print(f"Error getting user info: {e}")
+            return None
+
     async def get_messages(
         self, 
         settings: DownloadSettings
@@ -199,6 +260,7 @@ class TelegramService:
         await self.connect()
         entity = await self.client.get_entity(settings.chat_id)
         chat_title = getattr(entity, 'title', str(settings.chat_id))
+        chat_username = getattr(entity, 'username', None)
         
         topic_title = None
         if settings.topic_id:
@@ -240,6 +302,7 @@ class TelegramService:
                 id=message.id,
                 chat_id=settings.chat_id,
                 chat_title=chat_title,
+                chat_username=chat_username,
                 topic_id=settings.topic_id,
                 topic_title=topic_title,
                 author=author,

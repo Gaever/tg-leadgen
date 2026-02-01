@@ -1,17 +1,23 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { API_URL } from '../App'
 import { 
   Users, Hash, Megaphone, User, 
   ChevronRight, Download, X, Check,
-  Loader2, AlertCircle
+  Loader2, AlertCircle, MessageSquare
 } from 'lucide-react'
 import AuthModal from './AuthModal'
 import DownloadModal from './DownloadModal'
+
+// Глобальный кэш чатов
+let chatsCache = null
+let chatsCacheTime = 0
+const CACHE_TTL = 5 * 60 * 1000 // 5 минут
 
 function ChatsPage() {
   const [authStatus, setAuthStatus] = useState(null)
   const [chats, setChats] = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState(null)
   const [selectedChat, setSelectedChat] = useState(null)
   const [topics, setTopics] = useState([])
@@ -19,10 +25,24 @@ function ChatsPage() {
   const [showDownloadModal, setShowDownloadModal] = useState(false)
   const [showAuthModal, setShowAuthModal] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  
+  // Infinite scroll
+  const [displayCount, setDisplayCount] = useState(50)
+  const listRef = useRef(null)
 
   useEffect(() => {
     checkAuth()
   }, [])
+
+  // Infinite scroll handler
+  const handleScroll = useCallback(() => {
+    if (!listRef.current || loadingMore) return
+    
+    const { scrollTop, scrollHeight, clientHeight } = listRef.current
+    if (scrollTop + clientHeight >= scrollHeight - 200) {
+      setDisplayCount(prev => Math.min(prev + 30, filteredChats.length))
+    }
+  }, [loadingMore])
 
   const checkAuth = async () => {
     try {
@@ -41,12 +61,24 @@ function ChatsPage() {
     }
   }
 
-  const loadChats = async () => {
+  const loadChats = async (forceRefresh = false) => {
+    // Проверяем кэш
+    if (!forceRefresh && chatsCache && Date.now() - chatsCacheTime < CACHE_TTL) {
+      setChats(chatsCache)
+      setLoading(false)
+      return
+    }
+
     try {
       setLoading(true)
       const res = await fetch(`${API_URL}/api/chats/`)
       if (!res.ok) throw new Error('Ошибка загрузки чатов')
       const data = await res.json()
+      
+      // Сохраняем в кэш
+      chatsCache = data
+      chatsCacheTime = Date.now()
+      
       setChats(data)
     } catch (err) {
       setError(err.message)
@@ -114,6 +146,13 @@ function ChatsPage() {
     chat.title.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
+  // Reset display count when search changes
+  useEffect(() => {
+    setDisplayCount(50)
+  }, [searchQuery])
+
+  const displayedChats = filteredChats.slice(0, displayCount)
+
   if (!authStatus?.is_authorized) {
     return (
       <div className="h-full flex flex-col items-center justify-center p-8">
@@ -179,10 +218,21 @@ function ChatsPage() {
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full px-4 py-2 bg-telegram-bg rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-telegram-blue"
           />
+          
+          {!selectedChat && chats.length > 0 && (
+            <p className="text-xs text-telegram-textSecondary mt-2">
+              {filteredChats.length} чатов
+              {displayCount < filteredChats.length && ` (показано ${displayCount})`}
+            </p>
+          )}
         </div>
 
-        {/* List */}
-        <div className="flex-1 overflow-y-auto">
+        {/* List with infinite scroll */}
+        <div 
+          ref={listRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto"
+        >
           {loading ? (
             <div className="flex items-center justify-center h-32">
               <Loader2 className="animate-spin text-telegram-accent" size={32} />
@@ -215,40 +265,50 @@ function ChatsPage() {
               </div>
             ))
           ) : (
-            // Chats list
-            filteredChats.map(chat => (
-              <div
-                key={chat.id}
-                onClick={() => handleChatClick(chat)}
-                className={`flex items-center gap-3 px-4 py-3 hover:bg-telegram-hover cursor-pointer transition-colors ${
-                  selectedChat?.id === chat.id ? 'bg-telegram-active' : ''
-                }`}
-              >
-                <div className={`avatar ${getAvatarGradient(chat.id)}`}>
-                  {getInitials(chat.title)}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium truncate flex items-center gap-2">
-                      {getChatIcon(chat.type, chat.is_forum)}
-                      {chat.title}
-                    </span>
-                    {chat.is_forum && (
-                      <span className="text-xs text-telegram-accent">Форум</span>
-                    )}
+            // Chats list with infinite scroll
+            <>
+              {displayedChats.map(chat => (
+                <div
+                  key={chat.id}
+                  onClick={() => handleChatClick(chat)}
+                  className={`flex items-center gap-3 px-4 py-3 hover:bg-telegram-hover cursor-pointer transition-colors ${
+                    selectedChat?.id === chat.id ? 'bg-telegram-active' : ''
+                  }`}
+                >
+                  <div className={`avatar ${getAvatarGradient(chat.id)}`}>
+                    {getInitials(chat.title)}
                   </div>
-                  <p className="text-sm text-telegram-textSecondary truncate">
-                    {chat.username ? `@${chat.username}` : `ID: ${chat.id}`}
-                    {chat.members_count && ` • ${chat.members_count.toLocaleString()} участников`}
-                  </p>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium truncate flex items-center gap-2">
+                        {getChatIcon(chat.type, chat.is_forum)}
+                        {chat.title}
+                      </span>
+                      {chat.is_forum && (
+                        <span className="text-xs text-telegram-accent">Форум</span>
+                      )}
+                    </div>
+                    <p className="text-sm text-telegram-textSecondary truncate">
+                      {chat.username ? `@${chat.username}` : `ID: ${chat.id}`}
+                      {chat.members_count && ` • ${chat.members_count.toLocaleString()} участников`}
+                    </p>
+                  </div>
+                  {chat.is_forum ? (
+                    <ChevronRight size={20} className="text-telegram-textSecondary" />
+                  ) : (
+                    <Download size={18} className="text-telegram-textSecondary" />
+                  )}
                 </div>
-                {chat.is_forum ? (
-                  <ChevronRight size={20} className="text-telegram-textSecondary" />
-                ) : (
-                  <Download size={18} className="text-telegram-textSecondary" />
-                )}
-              </div>
-            ))
+              ))}
+              
+              {/* Loading more indicator */}
+              {displayCount < filteredChats.length && (
+                <div className="py-4 text-center text-telegram-textSecondary text-sm">
+                  <Loader2 className="animate-spin inline mr-2" size={16} />
+                  Загрузка...
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -295,8 +355,5 @@ function ChatsPage() {
     </div>
   )
 }
-
-// Import for icon
-import { MessageSquare } from 'lucide-react'
 
 export default ChatsPage

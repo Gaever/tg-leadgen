@@ -237,28 +237,25 @@ function DownloadModal({ chat, topic, onClose }) {
           >
             Закрыть
           </button>
-          <button
-            onClick={startDownload}
-            disabled={downloading}
-            className="flex-1 py-3 bg-telegram-blue rounded-xl font-medium hover:bg-opacity-90 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-          >
-            {downloading ? (
-              <>
-                <Loader2 className="animate-spin" size={20} />
-                Скачивание...
-              </>
-            ) : status === 'complete' ? (
-              <>
-                <Check size={20} />
-                Готово
-              </>
-            ) : (
-              <>
-                <Download size={20} />
-                Скачать
-              </>
-            )}
-          </button>
+          {status !== 'complete' && (
+            <button
+              onClick={startDownload}
+              disabled={downloading}
+              className="flex-1 py-3 bg-telegram-blue rounded-xl font-medium hover:bg-opacity-90 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {downloading ? (
+                <>
+                  <Loader2 className="animate-spin" size={20} />
+                  Скачивание...
+                </>
+              ) : (
+                <>
+                  <Download size={20} />
+                  Скачать
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>
