@@ -85,6 +85,17 @@ body {
   background: #2b5278;
 }
 
+.message-highlight {
+  border: 1px solid #3390ec;
+  box-shadow: 0 0 0 2px rgba(51, 144, 236, 0.2);
+  animation: highlightPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes highlightPulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(51, 144, 236, 0.2); }
+  50% { box-shadow: 0 0 0 6px rgba(51, 144, 236, 0.15); }
+}
+
 /* Loading spinner */
 .spinner {
   width: 24px;
